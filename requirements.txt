@@ -1,5 +1,5 @@
 click
-numpy
+numpy<2.0
 pyyaml
 tqdm
 scipy
