@@ -14,7 +14,7 @@ from utils import Datasets
 
 @click.command()
 @click.option('--seed', type=int, default=0)
-@click.option('--data', type=str, default='NetEase')
+@click.option('--data', type=str, default='Youshu')
 def main(seed, data):
     set_seed(seed)
     conf = yaml.safe_load(open("config.yaml"))[data]

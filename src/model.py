@@ -1,5 +1,6 @@
 import numpy as np
 import scipy.sparse as sp
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -119,6 +120,19 @@ class CoHeat(nn.Module):
         item_level_graph = sp.bmat([[sp.csr_matrix((ui_graph.shape[0], ui_graph.shape[0])), ui_graph], [ui_graph.T, sp.csr_matrix((ui_graph.shape[1], ui_graph.shape[1]))]])
         self.aff_view_graph_ori = to_tensor(laplace_transform(item_level_graph)).to(device)
 
+        # 1) COO 형식으로 변환
+        coo_aff = item_level_graph.tocoo()
+        N_total = item_level_graph.shape[0]  # = num_users + num_items
+
+        # 2) 인접 리스트 초기화 (각 노드를 key로, 이웃 노드 리스트를 value로)
+        self.aff_adj_list = { i: [] for i in range(N_total) }
+
+        # 3) (u, v) 쌍들을 순회하며 append
+        for u, v in zip(coo_aff.row.tolist(), coo_aff.col.tolist()):
+            # 무방향 그래프이므로 u->v, v->u 둘 다 추가
+            self.aff_adj_list[u].append(v)
+            self.aff_adj_list[v].append(u)
+
     def get_hist_graph(self):
         """
         Get a history-view graph
@@ -144,6 +158,13 @@ class CoHeat(nn.Module):
         device = self.device
         bundle_level_graph = sp.bmat([[sp.csr_matrix((ub_graph.shape[0], ub_graph.shape[0])), ub_graph], [ub_graph.T, sp.csr_matrix((ub_graph.shape[1], ub_graph.shape[1]))]])
         self.hist_view_graph_ori = to_tensor(laplace_transform(bundle_level_graph)).to(device)
+
+        coo_hist = bundle_level_graph.tocoo()
+        M_total = bundle_level_graph.shape[0]  # = num_users + num_bundles
+        self.hist_adj_list = { i: [] for i in range(M_total) }
+        for u, v in zip(coo_hist.row.tolist(), coo_hist.col.tolist()):
+            self.hist_adj_list[u].append(v)
+            self.hist_adj_list[v].append(u)
 
     def get_agg_graph(self):
         """
@@ -177,7 +198,7 @@ class CoHeat(nn.Module):
         One propagation
         """
         features = torch.cat((A_feature, B_feature), 0)
-        all_features = [features]
+        all_features = [features]            
 
         for i in range(self.num_layers):
             features = torch.spmm(graph, features)
@@ -190,6 +211,46 @@ class CoHeat(nn.Module):
         A_feature, B_feature = torch.split(all_features, (A_feature.shape[0], B_feature.shape[0]), 0)
 
         return A_feature, B_feature
+    
+    def one_propagate_sample(self, adjacency_list, A_feat, B_feat, num_samples=10):
+        """
+        GraphSAGE-style neighbor sampling propagation
+        """
+        features = torch.cat((A_feat, B_feat), dim=0)  # shape = (N, emb_size), N = num_A + num_B
+        N = features.shape[0]
+
+        # multi-layer를 쌓으면서 샘플링 + aggregation 집계
+        all_features = [features] 
+
+        for l in range(self.num_layers):
+            new_features = torch.zeros_like(features)
+
+            for u in range(N):
+                raw_neighbors = adjacency_list[u]
+                neigh_list = list(raw_neighbors)
+
+                if len(neigh_list) == 0:
+                    new_features[u] = features[u]
+                else:
+                    if len(neigh_list) > num_samples:
+                        sampled = random.sample(neigh_list, num_samples)  
+                    else:
+                        sampled = neigh_list 
+
+                    neigh_vecs = features[sampled, :] 
+                    new_features[u] = torch.mean(neigh_vecs, dim=0)
+
+            features = new_features / (l + 2)
+            features = F.normalize(features, p=2, dim=1)
+
+            all_features.append(features)
+
+        all_features = torch.stack(all_features, dim=1)  # shape = (N, num_layers+1, emb_size)
+        final_features = torch.sum(all_features, dim=1)   # shape = (N, emb_size)
+
+        A_out = final_features[: A_feat.shape[0], :]           # (num_A, emb_size)
+        B_out = final_features[A_feat.shape[0] :, :]           # (num_B, emb_size)
+        return A_out, B_out
 
     def get_aff_bundle_rep(self, aff_items_feature, test):
         """
@@ -202,28 +263,68 @@ class CoHeat(nn.Module):
 
         return aff_bundles_feature
 
-    def propagate(self, test=False):
-        """
-        Propagate the representations
-        """
-        # Affiliation-view
-        if test:
-            aff_users_feature, aff_items_feature = self.one_propagate(self.aff_view_graph_ori, self.users_feature, self.items_feature)
-        else:
-            aff_users_feature, aff_items_feature = self.one_propagate(self.aff_view_graph, self.users_feature, self.items_feature)
+    # def propagate(self, test=False):
+    #     """
+    #     Propagate the representations
+    #     """
+    #     # Affiliation-view
+    #     if test:
+    #         aff_users_feature, aff_items_feature = self.one_propagate(self.aff_view_graph_ori, self.users_feature, self.items_feature)
+    #     else:
+    #         aff_users_feature, aff_items_feature = self.one_propagate(self.aff_view_graph, self.users_feature, self.items_feature)
 
-        aff_bundles_feature = self.get_aff_bundle_rep(aff_items_feature, test)
+    #     aff_bundles_feature = self.get_aff_bundle_rep(aff_items_feature, test)
 
-        # History-view
+    #     # History-view
+    #     if test:
+    #         hist_users_feature, hist_bundles_feature = self.one_propagate(self.hist_view_graph_ori, self.users_feature, self.bundles_feature)
+    #     else:
+    #         hist_users_feature, hist_bundles_feature = self.one_propagate(self.hist_view_graph, self.users_feature, self.bundles_feature)
+
+    #     users_feature = [aff_users_feature, hist_users_feature]
+    #     bundles_feature = [aff_bundles_feature, hist_bundles_feature]
+
+    #     return users_feature, bundles_feature
+
+    def propagate(self, test=False, num_samples=10):
+        """
+        test=False: 학습 모드, test=True: 평가 모드
+        num_samples: 각 노드별로 샘플링할 이웃 개수 (GraphSAGE)
+        """
+
+        # 1) Affiliation-view 전파 (GraphSAGE-style)
+        #    A_feat = self.users_feature (shape = (num_users, emb_size))
+        #    B_feat = self.items_feature (shape = (num_items, emb_size))
+        #    adjacency_list = self.aff_adj_list (노드 수 = num_users + num_items)
+        aff_users_feature, aff_items_feature = self.one_propagate_sample(
+            self.aff_adj_list,
+            self.users_feature,
+            self.items_feature,
+            num_samples=num_samples
+        )
+
+        # 2) Aggregation-view: aff_items_feature → aff_bundles_feature
+        aff_bundles_feature = None
         if test:
-            hist_users_feature, hist_bundles_feature = self.one_propagate(self.hist_view_graph_ori, self.users_feature, self.bundles_feature)
+            aff_bundles_feature = torch.matmul(self.bundle_agg_graph_ori, aff_items_feature)
         else:
-            hist_users_feature, hist_bundles_feature = self.one_propagate(self.hist_view_graph, self.users_feature, self.bundles_feature)
+            aff_bundles_feature = torch.matmul(self.bundle_agg_graph, aff_items_feature)
+
+        # 3) History-view 전파 (GraphSAGE-style)
+        #    A_feat = self.users_feature (shape = (num_users, emb_size))
+        #    B_feat = self.bundles_feature (shape = (num_bundles, emb_size))
+        #    adjacency_list = self.hist_adj_list (노드 수 = num_users + num_bundles)
+        hist_users_feature, hist_bundles_feature = self.one_propagate_sample(
+            self.hist_adj_list,
+            self.users_feature,
+            self.bundles_feature,
+            num_samples=num_samples
+        )
 
         users_feature = [aff_users_feature, hist_users_feature]
         bundles_feature = [aff_bundles_feature, hist_bundles_feature]
-
         return users_feature, bundles_feature
+
 
     def cal_a_loss(self, x, y):
         """

@@ -1,6 +1,6 @@
 click
-numpy<2.0
+numpy
 pyyaml
 tqdm
 scipy
-torch==2.0.1
+torch
