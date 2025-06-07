@@ -1,5 +1,8 @@
 import pprint
 import random
+import psutil
+import os
+import time
 
 import click
 import numpy as np
@@ -11,14 +14,15 @@ from tqdm import tqdm
 from model import CoHeat
 from utils import Datasets
 
-
 @click.command()
 @click.option('--seed', type=int, default=0)
 @click.option('--data', type=str, default='Youshu')
-def main(seed, data):
+@click.option('--graph_type', type=str, default='LightGCN')
+def main(seed, data, graph_type):
     set_seed(seed)
     conf = yaml.safe_load(open("config.yaml"))[data]
     conf['dataset'] = data
+    conf["graph_type"] = graph_type
     dataset = Datasets(conf)
     conf['num_users'] = dataset.num_users
     conf['num_bundles'] = dataset.num_bundles
@@ -32,6 +36,12 @@ def main(seed, data):
     optimizer = optim.Adam(model.parameters(), lr=conf["lr"], weight_decay=conf["lambda2"])
     crit = 20
     best_vld_rec, best_vld_ndcg, best_content = 0., 0., ''
+    # 1) 프로세스 객체 (CPU 메모리 측정용)
+    process = psutil.Process(os.getpid())
+
+    def count_parameters(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = count_parameters(model)
 
     for epoch in range(1, conf["epochs"]+1):
         model.train(True)
@@ -39,6 +49,13 @@ def main(seed, data):
         cur_instance_num, loss_avg, bpr_loss_avg, c_loss_avg = 0., 0., 0., 0.
         mult = epoch / conf["epochs"]
         psi = conf["max_temp"] ** mult
+        # (A) GPU 메모리 통계 초기화
+        if device.type == 'cuda':
+            torch.cuda.reset_peak_memory_stats(device)
+        # (B) CPU 메모리 사용량 기록 (RSS: Resident Set Size)
+        start_cpu_mem = process.memory_info().rss
+        # (C) 시간 측정 시작
+        t0 = time.time()
 
         for batch_i, batch in pbar:
             model.train(True)
@@ -60,11 +77,25 @@ def main(seed, data):
             cur_instance_num += batch[0].size(0)
             pbar.set_description(f'epoch: {epoch:3d} | loss: {loss_avg:8.4f} | bpr_loss: {bpr_loss_avg:8.4f} | c_loss: {c_loss_avg:8.4f}')
 
+        # (E) 시간 측정 종료
+        elapsed = time.time() - t0
+
+        # (F) 메모리 측정
+        if device.type == 'cuda':
+            # peak GPU 메모리 (bytes)
+            peak_gpu = torch.cuda.max_memory_allocated(device)
+            used_gpu_mb = peak_gpu / (1024**2)
+        else:
+            used_gpu_mb = 0.0
+
+        end_cpu_mem = process.memory_info().rss
+        used_cpu_mb = (end_cpu_mem - start_cpu_mem) / (1024**2)
+
         if epoch % conf['test_interval'] == 0:
             metrics = {}
             metrics['val'] = test(model, dataset.val_loader, conf, psi)
             metrics['test'] = test(model, dataset.test_loader, conf, psi)
-            content = form_content(epoch, metrics['val'], metrics['test'], conf['topk'])
+            content = form_content(epoch, metrics['val'], metrics['test'], conf['topk'], elapsed, used_gpu_mb, used_cpu_mb, total_params)
             print(content)
             if metrics['val']['recall'][crit] > best_vld_rec and metrics['val']['ndcg'][crit] > best_vld_ndcg:
                 best_vld_rec = metrics['val']['recall'][crit]
@@ -98,7 +129,7 @@ def moving_avg(avg, cur_num, add_value_avg, add_num):
     return avg
 
 
-def form_content(epoch, val_results, test_results, ks):
+def form_content(epoch, val_results, test_results, ks, elapsed, used_gpu_mb, used_cpu_mb, total_params):
     """
     Form a printing content
     """
@@ -120,6 +151,8 @@ def form_content(epoch, val_results, test_results, ks):
     for k in ks:
         test_content += f'  {test_results_ndcg[k]:.4f} |'
     content += test_content
+    efficiency_content = f'\n elapsed : {elapsed} |  used_gpu_mb : {used_gpu_mb} |  used_cpu_mb : {used_cpu_mb} | total_params : {total_params}'
+    content += efficiency_content
     return content
 
 

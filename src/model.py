@@ -263,30 +263,30 @@ class CoHeat(nn.Module):
 
         return aff_bundles_feature
 
-    # def propagate(self, test=False):
-    #     """
-    #     Propagate the representations
-    #     """
-    #     # Affiliation-view
-    #     if test:
-    #         aff_users_feature, aff_items_feature = self.one_propagate(self.aff_view_graph_ori, self.users_feature, self.items_feature)
-    #     else:
-    #         aff_users_feature, aff_items_feature = self.one_propagate(self.aff_view_graph, self.users_feature, self.items_feature)
+    def propagate(self, test=False):
+        """
+        Propagate the representations
+        """
+        # Affiliation-view
+        if test:
+            aff_users_feature, aff_items_feature = self.one_propagate(self.aff_view_graph_ori, self.users_feature, self.items_feature)
+        else:
+            aff_users_feature, aff_items_feature = self.one_propagate(self.aff_view_graph, self.users_feature, self.items_feature)
 
-    #     aff_bundles_feature = self.get_aff_bundle_rep(aff_items_feature, test)
+        aff_bundles_feature = self.get_aff_bundle_rep(aff_items_feature, test)
 
-    #     # History-view
-    #     if test:
-    #         hist_users_feature, hist_bundles_feature = self.one_propagate(self.hist_view_graph_ori, self.users_feature, self.bundles_feature)
-    #     else:
-    #         hist_users_feature, hist_bundles_feature = self.one_propagate(self.hist_view_graph, self.users_feature, self.bundles_feature)
+        # History-view
+        if test:
+            hist_users_feature, hist_bundles_feature = self.one_propagate(self.hist_view_graph_ori, self.users_feature, self.bundles_feature)
+        else:
+            hist_users_feature, hist_bundles_feature = self.one_propagate(self.hist_view_graph, self.users_feature, self.bundles_feature)
 
-    #     users_feature = [aff_users_feature, hist_users_feature]
-    #     bundles_feature = [aff_bundles_feature, hist_bundles_feature]
+        users_feature = [aff_users_feature, hist_users_feature]
+        bundles_feature = [aff_bundles_feature, hist_bundles_feature]
 
-    #     return users_feature, bundles_feature
+        return users_feature, bundles_feature
 
-    def propagate(self, test=False, num_samples=10):
+    def propagate_sample(self, test=False, num_samples=10):
         """
         test=False: 학습 모드, test=True: 평가 모드
         num_samples: 각 노드별로 샘플링할 이웃 개수 (GraphSAGE)
@@ -377,7 +377,11 @@ class CoHeat(nn.Module):
             self.get_agg_graph()
 
         users, bundles = batch
-        users_feature, bundles_feature = self.propagate()
+        flg = self.conf["graph_type"]
+        if flg == "LightGCN" :
+            users_feature, bundles_feature = self.propagate()
+        else :
+            users_feature, bundles_feature = self.propagate_sample()
 
         users_embedding = [i[users].expand(-1, bundles.shape[1], -1) for i in users_feature]
         bundles_embedding = [i[bundles] for i in bundles_feature]
