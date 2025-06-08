@@ -17,7 +17,7 @@ from utils import Datasets
 @click.command()
 @click.option('--seed', type=int, default=0)
 @click.option('--data', type=str, default='Youshu')
-@click.option('--graph_type', type=str, default='LightGCN')
+@click.option('--graph_type', type=str, default='GraphSAGE')
 def main(seed, data, graph_type):
     set_seed(seed)
     conf = yaml.safe_load(open("config.yaml"))[data]
