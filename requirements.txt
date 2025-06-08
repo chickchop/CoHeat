@@ -18,4 +18,3 @@ torchaudio
 torchvision
 tqdm
 typing_extensions
-torch_scatter
